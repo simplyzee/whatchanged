@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>whatchanged</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e8ee; --muted: #8a91a3;
+    --high: #ff6b6b; --medium: #f5b14c; --low: #6c8cff; --signal: #8a91a3; --accent: #7ee0b8;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f7f8fa; --panel: #fff; --line: #e3e6ec; --text: #161a22; --muted: #5f6677; --accent: #0f8a5f; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font-size: 14px; }
+  header { display: flex; align-items: baseline; gap: 12px; padding: 18px 24px 8px; }
+  header h1 { margin: 0; font-size: 20px; letter-spacing: -0.02em; }
+  header h1 span { color: var(--accent); }
+  header p { margin: 0; color: var(--muted); }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px; padding: 8px 24px 16px; border-bottom: 1px solid var(--line); }
+  .bar input, .bar select, .bar button {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 7px 10px; font: inherit;
+  }
+  .bar button { cursor: pointer; }
+  .bar button.on { border-color: var(--accent); color: var(--accent); }
+  .bar label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  main { padding: 16px 24px 48px; max-width: 1100px; }
+  .meta { color: var(--muted); margin-bottom: 12px; }
+  .row { display: grid; grid-template-columns: 70px 12px 1fr; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .age { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 4px; }
+  .dot.high { background: var(--high); } .dot.medium { background: var(--medium); }
+  .dot.low { background: var(--low); } .dot.signal { background: transparent; border: 2px solid var(--signal); }
+  .title { font-weight: 600; }
+  .title .ns { color: var(--muted); font-weight: 400; }
+  .summary { margin-top: 2px; word-break: break-word; }
+  .tags { margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+  .score { font-size: 12px; font-weight: 700; color: var(--bg); background: var(--accent); border-radius: 6px; padding: 1px 6px; margin-right: 6px; }
+  .signal .summary, .signal .title { color: var(--muted); }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>what<span>changed</span></h1>
+  <p>Everything that changed in the cluster, on one timeline.</p>
+</header>
+<div class="bar">
+  <button id="mode-timeline" class="on" type="button">Timeline</button>
+  <button id="mode-suspects" type="button">Suspects</button>
+  <select id="since" aria-label="Time range">
+    <option value="15m">Last 15 min</option>
+    <option value="1h" selected>Last hour</option>
+    <option value="6h">Last 6 hours</option>
+    <option value="24h">Last 24 hours</option>
+    <option value="7d">Last 7 days</option>
+  </select>
+  <input id="namespace" placeholder="namespace(s)" aria-label="Namespace" size="14">
+  <select id="impact" aria-label="Minimum impact">
+    <option value="">Any impact</option>
+    <option value="medium">Medium+</option>
+    <option value="high">High only</option>
+  </select>
+  <input id="q" placeholder="search" aria-label="Search" size="14">
+  <label><input id="signals" type="checkbox" checked> warnings</label>
+</div>
+<main>
+  <div class="meta" id="meta"></div>
+  <div id="list"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let mode = 'timeline';
+
+function ago(t) {
+  const s = Math.max(0, (Date.now() - new Date(t).getTime()) / 1000);
+  if (s < 60) return Math.floor(s) + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  return Math.floor(s / 86400) + 'd';
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function render(items, isSuspects) {
+  const list = $('list');
+  list.replaceChildren();
+  if (!items.length) {
+    list.append(el('div', 'empty', isSuspects ? 'No suspects in this window. Lucky you.' : 'Nothing changed. Suspiciously quiet.'));
+    return;
+  }
+  for (const c of items) {
+    const signal = c.action === 'warning';
+    const row = el('div', 'row' + (signal ? ' signal' : ''));
+    row.append(el('div', 'age', ago(c.time)));
+    row.append(el('div', 'dot ' + (signal ? 'signal' : c.impact)));
+    const body = el('div');
+    const title = el('div', 'title');
+    if (isSuspects) title.append(el('span', 'score', String(c.score)));
+    title.append(document.createTextNode((c.kind ? c.kind + '/' : '') + c.name));
+    if (c.namespace) title.append(el('span', 'ns', '  ' + c.namespace));
+    body.append(title);
+    body.append(el('div', 'summary', c.summary));
+    const tags = el('div', 'tags');
+    for (const t of [c.source, c.action, c.actor && 'by ' + c.actor].filter(Boolean)) tags.append(el('span', 'tag', t));
+    if (isSuspects) for (const r of c.reasons || []) tags.append(el('span', 'tag', r));
+    if (c.url && /^https?:\/\//.test(c.url)) {
+      const a = el('a', 'tag', 'link'); a.href = c.url; a.rel = 'noopener noreferrer'; a.target = '_blank';
+      tags.append(a);
+    }
+    body.append(tags);
+    row.append(body);
+    list.append(row);
+  }
+}
+
+async function load() {
+  const p = new URLSearchParams();
+  const ns = $('namespace').value.trim();
+  if (ns) p.set('namespace', ns);
+  try {
+    if (mode === 'timeline') {
+      p.set('since', $('since').value);
+      if ($('impact').value) p.set('impact', $('impact').value);
+      if ($('q').value.trim()) p.set('q', $('q').value.trim());
+      if (!$('signals').checked) p.set('signals', 'false');
+      p.set('limit', '1000');
+      const r = await fetch('api/v1/changes?' + p);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || r.statusText);
+      $('meta').textContent = d.count + ' change(s) since ' + new Date(d.since).toLocaleString();
+      render(d.changes, false);
+    } else {
+      p.set('window', $('since').value);
+      const r = await fetch('api/v1/suspects?' + p);
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || r.statusText);
+      $('meta').textContent = 'Most likely culprits for a problem starting now (' + d.warnings + ' warning event(s) in window)';
+      render(d.suspects, true);
+    }
+  } catch (e) {
+    $('meta').textContent = 'Error: ' + e.message;
+  }
+}
+
+function setMode(m) {
+  mode = m;
+  $('mode-timeline').classList.toggle('on', m === 'timeline');
+  $('mode-suspects').classList.toggle('on', m === 'suspects');
+  load();
+}
+
+$('mode-timeline').onclick = () => setMode('timeline');
+$('mode-suspects').onclick = () => setMode('suspects');
+for (const id of ['since', 'impact', 'signals']) $(id).onchange = load;
+let t;
+for (const id of ['namespace', 'q']) $(id).oninput = () => { clearTimeout(t); t = setTimeout(load, 250); };
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

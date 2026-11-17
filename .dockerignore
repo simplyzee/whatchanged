@@ -1,0 +1,6 @@
+.git
+.github
+deploy
+examples
+dist
+*.md

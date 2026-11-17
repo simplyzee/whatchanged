@@ -1,0 +1,24 @@
+# Record every production deploy in whatchanged.
+# Add WHATCHANGED_URL and WHATCHANGED_TOKEN as repository secrets.
+- name: Record deploy in whatchanged
+  if: always()
+  env:
+    WHATCHANGED_URL: ${{ secrets.WHATCHANGED_URL }}
+    WHATCHANGED_TOKEN: ${{ secrets.WHATCHANGED_TOKEN }}
+  run: |
+    curl -fsS -X POST "$WHATCHANGED_URL/api/v1/changes" \
+      -H "Authorization: Bearer $WHATCHANGED_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d @- <<JSON
+    {
+      "source": "github-actions",
+      "kind": "Service",
+      "name": "${{ github.event.repository.name }}",
+      "namespace": "payments",
+      "action": "deploy",
+      "impact": "${{ job.status == 'success' && 'high' || 'medium' }}",
+      "summary": "deploy ${{ github.sha }} (${{ job.status }})",
+      "actor": "${{ github.actor }}",
+      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+    }
+    JSON

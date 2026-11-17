@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: go build ./cmd/whatchanged
+
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - run: helm lint deploy/helm/whatchanged
+      - run: helm template wc deploy/helm/whatchanged > /dev/null
+      - run: |
+          helm template wc deploy/helm/whatchanged \
+            --set persistence.enabled=true \
+            --set grafana.url=http://grafana --set grafana.existingSecret=g \
+            --set 'trackers.enable={secrets}' --set ingress.enabled=true \
+            --set serviceMonitor.enabled=true > /dev/null
+
+  # Real cluster: install the chart in kind, change a Deployment, and check
+  # that whatchanged recorded it.
+  kind:
+    runs-on: ubuntu-latest
+    needs: [test, chart]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: whatchanged
+      - name: Build and load image
+        run: |
+          docker build --build-arg VERSION=ci -t ghcr.io/simplyzee/whatchanged:ci .
+          kind load docker-image ghcr.io/simplyzee/whatchanged:ci --name whatchanged
+      - name: Install
+        run: |
+          helm install wc deploy/helm/whatchanged -n whatchanged --create-namespace \
+            --set image.tag=ci --set image.pullPolicy=Never --wait --timeout 3m
+      - name: Make some changes
+        run: |
+          kubectl create deployment demo --image=nginx:1.27-alpine
+          kubectl rollout status deploy/demo --timeout=2m
+          kubectl create configmap demo-config --from-literal=MODE=a
+          kubectl set image deploy/demo nginx=nginx:1.27.3-alpine
+          kubectl patch configmap demo-config -p '{"data":{"MODE":"b"}}'
+          kubectl scale deploy/demo --replicas=2
+      - name: Check whatchanged saw them
+        run: |
+          kubectl -n whatchanged port-forward svc/wc-whatchanged 8080:8080 &
+          sleep 3
+          go build -o wc ./cmd/whatchanged
+          for i in $(seq 1 30); do
+            out=$(./wc -n default --since 10m -o json)
+            if echo "$out" | grep -q '"action": "image"' \
+              && echo "$out" | grep -q '"action": "scale"' \
+              && echo "$out" | grep -q 'keys changed MODE'; then
+              ./wc -n default --since 10m
+              ./wc suspects -n default
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "$out"
+          kubectl -n whatchanged logs deploy/wc-whatchanged
+          exit 1

@@ -1,0 +1,145 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "whatchanged.fullname" . }}
+  labels:
+    {{- include "whatchanged.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if .Values.persistence.enabled }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "whatchanged.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "whatchanged.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "whatchanged.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: whatchanged
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - server
+            - --listen=:8080
+            - --retention={{ .Values.retention }}
+            - --max-changes={{ int .Values.maxChanges }}
+            - --log-level={{ .Values.logLevel }}
+            - --log-format={{ .Values.logFormat }}
+            - --exclude-namespaces={{ join "," .Values.trackers.excludeNamespaces }}
+            {{- with .Values.trackers.enable }}
+            - --enable={{ join "," . }}
+            {{- end }}
+            {{- with .Values.trackers.disable }}
+            - --disable={{ join "," . }}
+            {{- end }}
+            {{- if .Values.persistence.enabled }}
+            - --data-dir=/data
+            {{- end }}
+            {{- if .Values.ingest.enabled }}
+            - --ingest-token-file=/etc/whatchanged/ingest/{{ .Values.ingest.secretKey }}
+            {{- end }}
+            {{- with .Values.grafana.url }}
+            - --grafana-url={{ . }}
+            - --grafana-min-impact={{ $.Values.grafana.minImpact }}
+            {{- if $.Values.grafana.existingSecret }}
+            - --grafana-token-file=/etc/whatchanged/grafana/{{ $.Values.grafana.secretKey }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.clusterName }}
+            - --cluster-name={{ . }}
+            {{- end }}
+            {{- range .Values.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if .Values.ingest.enabled }}
+            - name: ingest
+              mountPath: /etc/whatchanged/ingest
+              readOnly: true
+            {{- end }}
+            {{- if and .Values.grafana.url .Values.grafana.existingSecret }}
+            - name: grafana
+              mountPath: /etc/whatchanged/grafana
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "whatchanged.fullname" .) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.ingest.enabled }}
+        - name: ingest
+          secret:
+            secretName: {{ include "whatchanged.ingestSecretName" . }}
+        {{- end }}
+        {{- if and .Values.grafana.url .Values.grafana.existingSecret }}
+        - name: grafana
+          secret:
+            secretName: {{ .Values.grafana.existingSecret }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

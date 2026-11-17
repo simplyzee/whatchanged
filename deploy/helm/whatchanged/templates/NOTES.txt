@@ -1,0 +1,19 @@
+whatchanged is watching your cluster.
+
+1. Open the timeline:
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "whatchanged.fullname" . }} 8080:{{ .Values.service.port }}
+   open http://localhost:8080
+
+2. Or use the CLI against the same port-forward:
+   whatchanged --since 30m
+   whatchanged suspects -n <namespace>
+{{- if .Values.ingest.enabled }}
+
+3. Push changes from CI / Terraform. The ingest token is in:
+   kubectl -n {{ .Release.Namespace }} get secret {{ include "whatchanged.ingestSecretName" . }} -o jsonpath='{.data.{{ .Values.ingest.secretKey }}}' | base64 -d
+{{- end }}
+{{- if gt (int .Values.replicaCount) 1 }}
+
+WARNING: replicaCount > 1 runs independent stores; the API will return
+different results per pod. Keep replicaCount at 1.
+{{- end }}

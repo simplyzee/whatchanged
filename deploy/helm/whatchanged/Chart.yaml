@@ -1,0 +1,18 @@
+apiVersion: v2
+name: whatchanged
+description: Answers the first question of every incident — what changed? Watches your cluster and CI for changes and ranks the likely culprits.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/simplyzee/whatchanged
+sources:
+  - https://github.com/simplyzee/whatchanged
+keywords:
+  - sre
+  - incident
+  - change-tracking
+  - kubernetes
+  - observability
+maintainers:
+  - name: simplyzee
+    url: https://simplyzee.dev

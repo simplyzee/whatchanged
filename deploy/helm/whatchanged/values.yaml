@@ -1,0 +1,125 @@
+# -- Number of replicas. Each replica keeps its own store, so keep this at 1.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/simplyzee/whatchanged
+  # -- Defaults to the chart appVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Shown as a tag on Grafana annotations (e.g. "prod-eu-west-1").
+clusterName: ""
+
+# -- How long to keep changes (Go duration or days, e.g. 72h, 7d).
+retention: 7d
+# -- Hard cap on stored changes.
+maxChanges: 250000
+
+trackers:
+  # -- Extra trackers to enable. Run `whatchanged trackers` for the list.
+  # "secrets" is opt-in because it needs to read Secret data (values are
+  # hashed in memory and never stored).
+  enable: []
+  # -- Trackers to disable, e.g. ["warning-events"].
+  disable: []
+  # -- Namespaces whose changes are ignored.
+  excludeNamespaces:
+    - kube-node-lease
+
+ingest:
+  # -- Accept changes pushed from CI, Terraform, feature flags… via
+  # POST /api/v1/changes.
+  enabled: true
+  # -- Use an existing Secret instead of generating one.
+  existingSecret: ""
+  # -- Key in the Secret holding the token.
+  secretKey: token
+
+grafana:
+  # -- Push changes to Grafana as annotations, e.g. http://grafana.monitoring.svc
+  url: ""
+  # -- Secret holding a Grafana service-account token (Editor role, or
+  # annotations:write).
+  existingSecret: ""
+  secretKey: token
+  # -- Minimum impact pushed to Grafana: low, medium or high.
+  minImpact: medium
+
+persistence:
+  # -- Persist changes so history survives restarts. Without it, Helm
+  # releases and recent Warning events are still backfilled on start.
+  enabled: false
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  existingClaim: ""
+
+logLevel: info
+logFormat: json
+
+# -- Extra command-line flags for `whatchanged server`.
+extraArgs: []
+extraEnv: []
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+rbac:
+  create: true
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: whatchanged.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+serviceMonitor:
+  # -- Create a Prometheus Operator ServiceMonitor.
+  enabled: false
+  interval: 30s
+  labels: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
