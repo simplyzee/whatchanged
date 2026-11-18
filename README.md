@@ -69,6 +69,8 @@ Each change records an **actor**: the Kubernetes field manager that last touched
 
 ## Install
 
+> Using an AI agent? Point it at [AGENTS.md](AGENTS.md): it has step-by-step instructions for installing the server and plugin and wiring up MCP in Claude Code, Claude Desktop, Cursor and others.
+
 ```bash
 helm repo add simplyzee https://charts.simplyzee.dev
 helm repo update
