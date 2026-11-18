@@ -36,6 +36,31 @@ jobs:
             --set 'trackers.enable={secrets}' --set ingress.enabled=true \
             --set serviceMonitor.enabled=true > /dev/null
 
+  # Install the kubectl plugin the way users do: krew + this repo as an index.
+  krew:
+    runs-on: ubuntu-latest
+    if: hashFiles('plugins/whatchanged.yaml') != ''
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install krew
+        run: |
+          cd "$(mktemp -d)"
+          curl -fsSLO https://github.com/kubernetes-sigs/krew/releases/latest/download/krew-linux_amd64.tar.gz
+          tar zxf krew-linux_amd64.tar.gz
+          ./krew-linux_amd64 install krew
+          echo "$HOME/.krew/bin" >> "$GITHUB_PATH"
+      - name: Install whatchanged from the custom index
+        run: |
+          kubectl krew index add simplyzee "${{ github.server_url }}/${{ github.repository }}.git"
+          kubectl krew install simplyzee/whatchanged
+          kubectl whatchanged version
+          kubectl whatchanged help | grep -q "kubectl whatchanged suspects"
+      - name: Install from the manifest in this commit
+        run: |
+          kubectl krew uninstall whatchanged
+          kubectl krew install --manifest=plugins/whatchanged.yaml
+          kubectl whatchanged version
+
   # Real cluster: install the chart in kind, change a Deployment, and check
   # that whatchanged recorded it.
   kind:
