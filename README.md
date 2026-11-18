@@ -47,8 +47,9 @@ Each change records an **actor**: the Kubernetes field manager that last touched
 ## Install
 
 ```bash
-git clone https://github.com/simplyzee/whatchanged
-helm install whatchanged ./whatchanged/deploy/helm/whatchanged \
+helm repo add simplyzee https://charts.simplyzee.dev
+helm repo update
+helm install whatchanged simplyzee/whatchanged \
   -n whatchanged --create-namespace \
   --set persistence.enabled=true
 ```
@@ -118,7 +119,7 @@ See [`examples/`](examples/) for a GitHub Actions step and a Terraform wrapper. 
 
 ```bash
 kubectl -n whatchanged create secret generic grafana-token --from-literal=token=glsa_...
-helm upgrade whatchanged ./deploy/helm/whatchanged -n whatchanged --reuse-values \
+helm upgrade whatchanged simplyzee/whatchanged -n whatchanged --reuse-values \
   --set grafana.url=http://grafana.monitoring.svc \
   --set grafana.existingSecret=grafana-token \
   --set clusterName=prod-eu-west-1
