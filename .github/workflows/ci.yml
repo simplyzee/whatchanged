@@ -39,7 +39,6 @@ jobs:
   # Install the kubectl plugin the way users do: krew + this repo as an index.
   krew:
     runs-on: ubuntu-latest
-    if: hashFiles('plugins/whatchanged.yaml') != ''
     steps:
       - uses: actions/checkout@v4
       - name: Install krew
