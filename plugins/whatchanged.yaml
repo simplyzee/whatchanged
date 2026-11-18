@@ -1,0 +1,87 @@
+apiVersion: krew.googlecontainertools.github.com/v1alpha2
+kind: Plugin
+metadata:
+  name: whatchanged
+spec:
+  version: v0.2.0
+  homepage: https://github.com/simplyzee/whatchanged
+  shortDescription: Show what changed and rank incident culprits
+  description: |
+    Answers the first question of every incident: what changed?
+    Lists recent changes (rollouts, ConfigMaps, Helm releases, Argo CD and
+    Flux syncs, RBAC, network policies, nodes, CI deploys…) recorded by the
+    whatchanged server and ranks the changes most likely to have caused a
+    problem, with the reasons for each score.
+
+      kubectl whatchanged --since 30m -n payments
+      kubectl whatchanged suspects -n payments
+      kubectl whatchanged show <id>
+
+    Requires the whatchanged server in the cluster (Helm chart:
+    https://charts.simplyzee.dev). The plugin reaches it with kubectl
+    port-forward automatically.
+  caveats: |
+    This plugin talks to the whatchanged server. Install it with:
+      helm repo add simplyzee https://charts.simplyzee.dev
+      helm install whatchanged simplyzee/whatchanged -n whatchanged --create-namespace
+  platforms:
+  - selector:
+      matchLabels:
+        os: linux
+        arch: amd64
+    uri: https://github.com/simplyzee/whatchanged/releases/download/v0.2.0/whatchanged_0.2.0_linux_amd64.tar.gz
+    sha256: 0efb416f382dae9d1b53aba6c4066ca9e3398350be763d1f67c6d3d2508756be
+    files:
+      - from: "whatchanged_0.2.0_linux_amd64/whatchanged"
+        to: "."
+      - from: "whatchanged_0.2.0_linux_amd64/LICENSE"
+        to: "."
+    bin: whatchanged
+  - selector:
+      matchLabels:
+        os: linux
+        arch: arm64
+    uri: https://github.com/simplyzee/whatchanged/releases/download/v0.2.0/whatchanged_0.2.0_linux_arm64.tar.gz
+    sha256: b04dd939b48022995da2bc3e0e40c478a86844ef6ceeca77907310ff1a2ddf96
+    files:
+      - from: "whatchanged_0.2.0_linux_arm64/whatchanged"
+        to: "."
+      - from: "whatchanged_0.2.0_linux_arm64/LICENSE"
+        to: "."
+    bin: whatchanged
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: amd64
+    uri: https://github.com/simplyzee/whatchanged/releases/download/v0.2.0/whatchanged_0.2.0_darwin_amd64.tar.gz
+    sha256: 5474030d3ecd1ec9fd2daa539198076d6988035f06e17e66e8063f7a4151e12b
+    files:
+      - from: "whatchanged_0.2.0_darwin_amd64/whatchanged"
+        to: "."
+      - from: "whatchanged_0.2.0_darwin_amd64/LICENSE"
+        to: "."
+    bin: whatchanged
+  - selector:
+      matchLabels:
+        os: darwin
+        arch: arm64
+    uri: https://github.com/simplyzee/whatchanged/releases/download/v0.2.0/whatchanged_0.2.0_darwin_arm64.tar.gz
+    sha256: 40e38463894c080955efec7a8cce251d66d2df2641d820d2b3782c18e1c29f88
+    files:
+      - from: "whatchanged_0.2.0_darwin_arm64/whatchanged"
+        to: "."
+      - from: "whatchanged_0.2.0_darwin_arm64/LICENSE"
+        to: "."
+    bin: whatchanged
+  - selector:
+      matchLabels:
+        os: windows
+        arch: amd64
+    uri: https://github.com/simplyzee/whatchanged/releases/download/v0.2.0/whatchanged_0.2.0_windows_amd64.tar.gz
+    sha256: 119d04e42c19540af58330bbbf679939f4d5cdfce06e09f7f1be585279356a28
+    files:
+      - from: "whatchanged_0.2.0_windows_amd64/whatchanged.exe"
+        to: "."
+      - from: "whatchanged_0.2.0_windows_amd64/LICENSE"
+        to: "."
+    bin: whatchanged.exe
