@@ -41,6 +41,10 @@ type Server struct {
 	// Status returns extra info for /api/v1/status (e.g. tracker states).
 	Status func() any
 	Now    func() time.Time
+	// Relations links Warning events to the changes that caused them.
+	Relations suspects.Relations
+	// Annotate adds risk flags to pushed changes.
+	Annotate func(*change.Change)
 }
 
 // Handler returns the HTTP handler.
@@ -53,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/changes", s.listChanges)
+	mux.HandleFunc("GET /api/v1/changes/{id}", s.getChange)
 	mux.HandleFunc("POST /api/v1/changes", s.ingest)
 	mux.HandleFunc("GET /api/v1/suspects", s.suspects)
 	mux.HandleFunc("GET /api/v1/grafana/annotations", s.annotations)
@@ -111,6 +116,7 @@ func ParseFilter(r *http.Request, now time.Time) (store.Filter, error) {
 		Kinds:      list(q, "kind"),
 		Sources:    list(q, "source"),
 		Actions:    list(q, "action"),
+		Flags:      list(q, "flag"),
 		Text:       q.Get("q"),
 		Limit:      defaultLimit,
 	}
@@ -161,6 +167,11 @@ func (s *Server) listChanges(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := s.Store.Query(f)
+	if q := r.URL.Query().Get("diff"); q != "true" && q != "1" {
+		for i := range res {
+			res[i].Diff = nil // keep list payloads small; fetch one change for its diff
+		}
+	}
 	until := f.Until
 	if until.IsZero() {
 		until = now
@@ -206,7 +217,7 @@ func (s *Server) suspects(w http.ResponseWriter, r *http.Request) {
 			warnings++
 		}
 	}
-	res := suspects.Rank(records, suspects.Query{At: at, Window: window, Namespaces: list(q, "namespace"), Limit: limit})
+	res := suspects.Rank(records, suspects.Query{At: at, Window: window, Namespaces: list(q, "namespace"), Limit: limit, Relations: s.Relations})
 	if res == nil {
 		res = []suspects.Suspect{}
 	}
@@ -276,6 +287,9 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 			badRequest(w, fmt.Errorf("change %d: time is in the future", i))
 			return
 		}
+		if s.Annotate != nil {
+			s.Annotate(c)
+		}
 	}
 	for _, c := range batch {
 		added, err := s.Store.Add(c)
@@ -340,6 +354,18 @@ func (s *Server) annotations(w http.ResponseWriter, r *http.Request) {
 		out = append(out, GrafanaAnnotation{Time: ms, TimeEnd: ms, Title: c.Object(), Text: text, Tags: tags})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) getChange(w http.ResponseWriter, r *http.Request) {
+	c, ok, err := s.Store.Get(r.PathValue("id"))
+	switch {
+	case err != nil:
+		badRequest(w, err)
+	case !ok:
+		writeJSON(w, http.StatusNotFound, apiError{"no change with that id"})
+	default:
+		writeJSON(w, http.StatusOK, c)
+	}
 }
 
 func (s *Server) readyz(w http.ResponseWriter, _ *http.Request) {

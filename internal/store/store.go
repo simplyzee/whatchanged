@@ -270,6 +270,7 @@ type Filter struct {
 	Sources    []string
 	Actions    []string
 	MinImpact  change.Impact
+	Flags      []string // any of
 	Text       string
 	NoSignals  bool
 	Limit      int
@@ -305,6 +306,18 @@ func (f Filter) Match(c change.Change) bool {
 	if f.NoSignals && c.IsSignal() {
 		return false
 	}
+	if len(f.Flags) > 0 {
+		hit := false
+		for _, fl := range f.Flags {
+			if c.HasFlag(fl) {
+				hit = true
+				break
+			}
+		}
+		if !hit {
+			return false
+		}
+	}
 	if f.Text != "" {
 		q := strings.ToLower(f.Text)
 		hay := strings.ToLower(strings.Join([]string{c.Name, c.Summary, c.Actor, c.Kind, c.Namespace}, " "))
@@ -337,4 +350,37 @@ func (s *Store) Query(f Filter) []change.Change {
 		}
 	}
 	return out
+}
+
+// ErrAmbiguous is returned by Get when an ID prefix matches several changes.
+var ErrAmbiguous = errors.New("id prefix matches more than one change")
+
+// Get returns the change with the given ID, or the single change whose ID
+// starts with the given prefix (at least 6 characters).
+func (s *Store) Get(id string) (change.Change, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, ok := s.ids[id]; ok {
+		for i := len(s.items) - 1; i >= 0; i-- {
+			if s.items[i].ID == id {
+				return s.items[i], true, nil
+			}
+		}
+	}
+	if len(id) < 6 {
+		return change.Change{}, false, nil
+	}
+	var found *change.Change
+	for i := range s.items {
+		if strings.HasPrefix(s.items[i].ID, id) {
+			if found != nil {
+				return change.Change{}, false, ErrAmbiguous
+			}
+			found = &s.items[i]
+		}
+	}
+	if found == nil {
+		return change.Change{}, false, nil
+	}
+	return *found, true, nil
 }

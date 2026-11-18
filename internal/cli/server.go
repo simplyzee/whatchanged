@@ -16,13 +16,21 @@ import (
 
 	"github.com/simplyzee/whatchanged/internal/api"
 	"github.com/simplyzee/whatchanged/internal/change"
+	"github.com/simplyzee/whatchanged/internal/client"
 	"github.com/simplyzee/whatchanged/internal/grafana"
 	"github.com/simplyzee/whatchanged/internal/kube"
+	"github.com/simplyzee/whatchanged/internal/mcp"
 	"github.com/simplyzee/whatchanged/internal/metrics"
+	"github.com/simplyzee/whatchanged/internal/risk"
 	"github.com/simplyzee/whatchanged/internal/store"
 	"github.com/simplyzee/whatchanged/internal/timeparse"
 	"github.com/simplyzee/whatchanged/internal/tracker"
 )
+
+type multiFlag []string
+
+func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
 
 func splitList(s string) []string {
 	var out []string
@@ -65,6 +73,11 @@ func runServer(args []string, stderr io.Writer) error {
 	grafanaTokenFile := fs.String("grafana-token-file", "", "Grafana service-account token file (or set WHATCHANGED_GRAFANA_TOKEN)")
 	grafanaMin := fs.String("grafana-min-impact", "medium", "minimum impact pushed to Grafana")
 	cluster := fs.String("cluster-name", "", "cluster name, added as a tag on Grafana annotations")
+	diffs := fs.String("diffs", "redacted", "record object diffs: off, redacted (hide env values, ConfigMap data and secret-looking keys) or full")
+	hours := fs.String("business-hours", "Mon-Fri 08:00-18:00", `flag changes outside these hours ("off" to disable)`)
+	tz := fs.String("timezone", "UTC", "time zone for --business-hours and --freeze dates, e.g. Europe/London")
+	var freezes multiFlag
+	fs.Var(&freezes, "freeze", "change freeze window [name=]start/end, e.g. xmas=2026-12-20/2027-01-03 (repeatable)")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
 	logFormat := fs.String("log-format", "json", "json or text")
 	if err := fs.Parse(args); err != nil {
@@ -99,6 +112,21 @@ func runServer(args []string, stderr io.Writer) error {
 	minImpact, err := change.ParseImpact(*grafanaMin)
 	if err != nil {
 		return err
+	}
+	diffMode, err := tracker.ParseDiffMode(*diffs)
+	if err != nil {
+		return err
+	}
+	var riskCfg risk.Config
+	if riskCfg.Hours, err = risk.ParseHours(*hours, *tz); err != nil {
+		return err
+	}
+	for _, f := range freezes {
+		w, err := risk.ParseWindow(f, *tz)
+		if err != nil {
+			return err
+		}
+		riskCfg.Freezes = append(riskCfg.Freezes, w)
 	}
 
 	st, err := store.Open(store.Options{Dir: *dataDir, Retention: ret, MaxItems: *maxChanges})
@@ -142,16 +170,19 @@ func runServer(args []string, stderr io.Writer) error {
 	for _, ns := range splitList(*excludeNS) {
 		excluded[ns] = true
 	}
+	graph := tracker.NewGraph(nil)
 	sink := func(c change.Change) {
 		if c.Namespace != "" && excluded[c.Namespace] {
 			return
 		}
+		riskCfg.Annotate(&c)
 		if _, err := st.Add(c); err != nil {
 			logger.Error("persist change", "err", err)
 		}
 	}
 
-	srv := &api.Server{Store: st, IngestToken: ingestToken, Metrics: reg, Logger: logger}
+	srv := &api.Server{Store: st, IngestToken: ingestToken, Metrics: reg, Logger: logger,
+		Relations: graph, Annotate: riskCfg.Annotate}
 	runner := &tracker.Runner{Logger: logger}
 	if *noKube {
 		srv.Ready = func() bool { return true }
@@ -163,7 +194,7 @@ func runServer(args []string, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		trackers, err := tracker.Select(splitList(*enable), splitList(*disable), sink, nil)
+		trackers, err := tracker.Select(splitList(*enable), splitList(*disable), tracker.Env{Sink: sink, Diffs: diffMode, Graph: graph})
 		if err != nil {
 			return err
 		}
@@ -212,9 +243,14 @@ func runServer(args []string, stderr io.Writer) error {
 		}
 	}()
 
+	apiHandler := srv.Handler()
+	mcpServer := &mcp.Server{Client: client.Local(apiHandler, ingestToken), Version: Version, Logger: logger}
+	root := http.NewServeMux()
+	root.Handle("/mcp", mcpServer.HTTPHandler(ingestToken))
+	root.Handle("/", apiHandler)
 	hs := &http.Server{
 		Addr:              *listen,
-		Handler:           srv.Handler(),
+		Handler:           root,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,

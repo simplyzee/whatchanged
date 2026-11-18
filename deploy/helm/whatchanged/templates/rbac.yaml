@@ -9,10 +9,43 @@ metadata:
 rules:
   # Read-only: whatchanged never writes to the cluster.
   - apiGroups: ["apps"]
-    resources: ["deployments", "statefulsets", "daemonsets"]
+    resources: ["deployments", "statefulsets", "daemonsets", "replicasets"]
     verbs: ["list", "watch"]
   - apiGroups: [""]
-    resources: ["configmaps", "nodes", "events"]
+    resources: ["configmaps", "nodes", "events", "services", "pods", "resourcequotas", "limitranges"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["priorityclasses"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations", "validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "clusterroles", "rolebindings", "clusterrolebindings"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways", "httproutes", "grpcroutes"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["keda.sh"]
+    resources: ["scaledobjects"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers", "clusterissuers"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["configuration.konghq.com"]
+    resources: ["kongplugins", "kongclusterplugins", "kongingresses"]
     verbs: ["list", "watch"]
   {{- if or (include "whatchanged.trackerOn" (list "helm-releases" true $v)) (include "whatchanged.trackerOn" (list "secrets" false $v)) }}
   # Helm stores releases in Secrets. The helm tracker only requests object
@@ -22,10 +55,19 @@ rules:
     verbs: ["list", "watch"]
   {{- end }}
   - apiGroups: ["networking.k8s.io"]
-    resources: ["networkpolicies"]
+    resources: ["networkpolicies", "ingresses"]
     verbs: ["list", "watch"]
   - apiGroups: ["cilium.io"]
-    resources: ["ciliumnetworkpolicies", "ciliumclusterwidenetworkpolicies"]
+    resources:
+      - ciliumnetworkpolicies
+      - ciliumclusterwidenetworkpolicies
+      - ciliumegressgatewaypolicies
+      - ciliumbgppeeringpolicies
+      - ciliumbgpclusterconfigs
+      - ciliumbgppeerconfigs
+      - ciliumbgpadvertisements
+      - ciliumloadbalancerippools
+      - ciliuml2announcementpolicies
     verbs: ["list", "watch"]
   - apiGroups: ["argoproj.io"]
     resources: ["applications"]

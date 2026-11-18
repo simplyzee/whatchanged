@@ -84,7 +84,7 @@ func TestEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := func(c change.Change) { st.Add(c) }
-	trackers, err := tracker.Select(nil, []string{"configmaps", "nodes", "networkpolicies", "statefulsets", "daemonsets"}, sink, nil)
+	trackers, err := tracker.Select(nil, []string{"configmaps", "nodes", "networkpolicies", "statefulsets", "daemonsets"}, tracker.Env{Sink: sink})
 	if err != nil {
 		t.Fatal(err)
 	}

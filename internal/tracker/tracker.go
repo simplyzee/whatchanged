@@ -82,28 +82,60 @@ type Spec[T any] struct {
 	// Backfill is called for every object on the very first list, so
 	// recent history (Helm revisions, Warning events…) survives restarts.
 	Backfill func(e Emitter, m Meta, v T)
+	// Diffable records a flattened copy of each object so updates can
+	// carry a line diff (subject to Env.Diffs).
+	Diffable bool
+	// Redact reports whether the value at a flattened path must be hidden
+	// in "redacted" diff mode (in addition to the global rules).
+	Redact func(path string) bool
+}
+
+// Env is what every tracker needs from the outside world.
+type Env struct {
+	Sink  Sink
+	Now   func() time.Time
+	Diffs DiffMode
+	Graph *Graph
+}
+
+func (e Env) withDefaults() Env {
+	if e.Now == nil {
+		e.Now = time.Now
+	}
+	if e.Sink == nil {
+		e.Sink = func(change.Change) {}
+	}
+	if e.Graph == nil {
+		e.Graph = NewGraph(e.Now)
+	}
+	return e
 }
 
 type entry[T any] struct {
 	meta Meta
 	val  T
+	flat map[string]string
 }
 
 // Generic is a Tracker built from a Spec.
 type Generic[T any] struct {
 	spec  Spec[T]
-	sink  Sink
-	now   func() time.Time
+	env   Env
 	mu    sync.Mutex
 	state map[string]entry[T]
 }
 
 // New builds a tracker from a spec.
-func New[T any](spec Spec[T], sink Sink, now func() time.Time) *Generic[T] {
-	if now == nil {
-		now = time.Now
+func New[T any](spec Spec[T], env Env) *Generic[T] {
+	return &Generic[T]{spec: spec, env: env.withDefaults(), state: map[string]entry[T]{}}
+}
+
+func (g *Generic[T]) decode(raw json.RawMessage) (Meta, T, map[string]string, error) {
+	m, v, err := g.spec.Decode(raw)
+	if err != nil || !g.spec.Diffable || g.env.Diffs == DiffsOff {
+		return m, v, nil, err
 	}
-	return &Generic[T]{spec: spec, sink: sink, now: now, state: map[string]entry[T]{}}
+	return m, v, flattenObject(raw, g.env.Diffs, g.spec.Redact), nil
 }
 
 func (g *Generic[T]) Name() string               { return g.spec.Name }
@@ -118,7 +150,18 @@ func key(m Meta) string {
 }
 
 func (g *Generic[T]) emitter(m Meta) Emitter {
-	return Emitter{spec: specInfo{g.spec.Kind, g.spec.Source}, meta: m, sink: g.sink, now: g.now}
+	return Emitter{spec: specInfo{g.spec.Kind, g.spec.Source}, meta: m, sink: g.env.Sink, now: g.env.Now, graph: g.env.Graph}
+}
+
+func (g *Generic[T]) updated(m Meta, old entry[T], v T, flat map[string]string) {
+	if g.spec.Updated == nil {
+		return
+	}
+	e := g.emitter(m)
+	if old.flat != nil && flat != nil {
+		e.diff = diffFlat(old.flat, flat, maxDiffLines)
+	}
+	g.spec.Updated(e, m, old.val, v)
 }
 
 // Replace implements kube.Handler.
@@ -127,12 +170,12 @@ func (g *Generic[T]) Replace(items []json.RawMessage, initial bool) {
 	defer g.mu.Unlock()
 	next := make(map[string]entry[T], len(items))
 	for _, raw := range items {
-		m, v, err := g.spec.Decode(raw)
+		m, v, flat, err := g.decode(raw)
 		if err != nil {
 			continue
 		}
 		k := key(m)
-		next[k] = entry[T]{m, v}
+		next[k] = entry[T]{m, v, flat}
 		if initial {
 			if g.spec.Backfill != nil {
 				g.spec.Backfill(g.emitter(m), m, v)
@@ -141,8 +184,8 @@ func (g *Generic[T]) Replace(items []json.RawMessage, initial bool) {
 		}
 		// A relist: diff against what we knew so nothing is missed.
 		if old, ok := g.state[k]; ok {
-			if old.meta.ResourceVersion != m.ResourceVersion && g.spec.Updated != nil {
-				g.spec.Updated(g.emitter(m), m, old.val, v)
+			if old.meta.ResourceVersion != m.ResourceVersion {
+				g.updated(m, old, v, flat)
 			}
 		} else if g.spec.Added != nil {
 			g.spec.Added(g.emitter(m), m, v)
@@ -160,7 +203,7 @@ func (g *Generic[T]) Replace(items []json.RawMessage, initial bool) {
 
 // Apply implements kube.Handler.
 func (g *Generic[T]) Apply(ev kube.Event) {
-	m, v, err := g.spec.Decode(ev.Object)
+	m, v, flat, err := g.decode(ev.Object)
 	if err != nil {
 		return
 	}
@@ -170,14 +213,12 @@ func (g *Generic[T]) Apply(ev kube.Event) {
 	old, known := g.state[k]
 	switch ev.Type {
 	case "ADDED", "MODIFIED":
-		g.state[k] = entry[T]{m, v}
+		g.state[k] = entry[T]{m, v, flat}
 		switch {
 		case known && old.meta.ResourceVersion == m.ResourceVersion:
 			// replayed event, nothing new
 		case known:
-			if g.spec.Updated != nil {
-				g.spec.Updated(g.emitter(m), m, old.val, v)
-			}
+			g.updated(m, old, v, flat)
 		case ev.Type == "ADDED":
 			if g.spec.Added != nil {
 				g.spec.Added(g.emitter(m), m, v)
@@ -196,11 +237,16 @@ type specInfo struct{ kind, source string }
 
 // Emitter builds changes for one object.
 type Emitter struct {
-	spec specInfo
-	meta Meta
-	sink Sink
-	now  func() time.Time
+	spec  specInfo
+	meta  Meta
+	sink  Sink
+	now   func() time.Time
+	graph *Graph
+	diff  []string
 }
+
+// Graph returns the shared object graph.
+func (e Emitter) Graph() *Graph { return e.graph }
 
 // Opt adjusts a change before it is emitted.
 type Opt func(*change.Change)
@@ -225,6 +271,16 @@ func Object(kind, namespace, name string) Opt {
 	return func(c *change.Change) { c.Kind, c.Namespace, c.Name = kind, namespace, name }
 }
 
+// Label sets a label on the change.
+func Label(k, v string) Opt {
+	return func(c *change.Change) {
+		if c.Labels == nil {
+			c.Labels = map[string]string{}
+		}
+		c.Labels[k] = v
+	}
+}
+
 // Actor overrides the actor.
 func Actor(a string) Opt { return func(c *change.Change) { c.Actor = a } }
 
@@ -244,6 +300,9 @@ func (e Emitter) Emit(action string, impact change.Impact, summary string, opts 
 	// Default ID: unique per object revision and action, so a relist or a
 	// replayed watch event never double-counts.
 	c.ID = change.MakeID(c.Source, c.Kind, key(e.meta), e.meta.ResourceVersion, action, summary)
+	if len(e.diff) > 0 {
+		c.Diff = e.diff
+	}
 	for _, o := range opts {
 		o(&c)
 	}

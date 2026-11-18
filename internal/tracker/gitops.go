@@ -96,7 +96,7 @@ func healthSignal(e Emitter, old, cur gitopsApp, bad string) {
 }
 
 // ArgoApplications tracks Argo CD Applications (optional CRD).
-func ArgoApplications(sink Sink, now func() time.Time) Tracker {
+func ArgoApplications(env Env) Tracker {
 	return New(Spec[gitopsApp]{
 		Name:      "argocd-applications",
 		Kind:      "Application",
@@ -115,7 +115,7 @@ func ArgoApplications(sink Sink, now func() time.Time) Tracker {
 				emitSync(e, m, gitopsApp{}, cur)
 			}
 		},
-	}, sink, now)
+	}, env)
 }
 
 // --- Flux --------------------------------------------------------------------
@@ -175,19 +175,19 @@ func fluxSpec(name, kind string, paths ...string) Spec[gitopsApp] {
 }
 
 // FluxKustomizations tracks Flux Kustomizations (optional CRD).
-func FluxKustomizations(sink Sink, now func() time.Time) Tracker {
+func FluxKustomizations(env Env) Tracker {
 	return New(fluxSpec("flux-kustomizations", "Kustomization",
 		"/apis/kustomize.toolkit.fluxcd.io/v1/kustomizations",
 		"/apis/kustomize.toolkit.fluxcd.io/v1beta2/kustomizations",
-	), sink, now)
+	), env)
 }
 
 // FluxHelmReleases tracks Flux HelmReleases (optional CRD).
-func FluxHelmReleases(sink Sink, now func() time.Time) Tracker {
+func FluxHelmReleases(env Env) Tracker {
 	return New(fluxSpec("flux-helmreleases", "HelmRelease",
 		"/apis/helm.toolkit.fluxcd.io/v2/helmreleases",
 		"/apis/helm.toolkit.fluxcd.io/v2beta2/helmreleases",
-	), sink, now)
+	), env)
 }
 
 func truncate(s string, n int) string {

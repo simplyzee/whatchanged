@@ -1,7 +1,9 @@
-// Package cli implements the whatchanged command line.
+// Package cli implements the whatchanged command line (also installed as
+// the kubectl plugin `kubectl whatchanged`).
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -9,12 +11,14 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
-	"text/tabwriter"
+	"syscall"
 	"time"
 
-	"github.com/simplyzee/whatchanged/internal/api"
 	"github.com/simplyzee/whatchanged/internal/change"
+	"github.com/simplyzee/whatchanged/internal/mcp"
+	"github.com/simplyzee/whatchanged/internal/render"
 	"github.com/simplyzee/whatchanged/internal/tracker"
 )
 
@@ -22,29 +26,54 @@ import (
 var (
 	Version = "dev"
 	Commit  = "none"
+	// Plugin is true when invoked as kubectl-whatchanged.
+	Plugin = false
+	// Stdin is read by `whatchanged mcp`.
+	Stdin io.Reader = os.Stdin
 )
 
-const usage = `whatchanged — what changed in my cluster, and what probably broke it?
+func prog() string {
+	if Plugin {
+		return "kubectl whatchanged"
+	}
+	return "whatchanged"
+}
+
+func usage() string {
+	return strings.ReplaceAll(`PROG: what changed in my cluster, and what probably broke it?
 
 Usage:
-  whatchanged [list] [flags]     Show recent changes (default command)
-  whatchanged suspects [flags]   Rank the most likely culprits for a problem
-  whatchanged push [flags]       Record a change from CI, Terraform, a script…
-  whatchanged server [flags]     Run the watcher + API (usually in-cluster)
-  whatchanged trackers           List the built-in change trackers
-  whatchanged version
+  PROG [list] [flags]      Show recent changes (default command)
+  PROG suspects [flags]    Rank the most likely culprits for a problem
+  PROG show <id>           Show one change, with its diff
+  PROG push [flags]        Record a change from CI, Terraform, a script…
+  PROG mcp                 Run an MCP server on stdio for AI agents
+  PROG server [flags]      Run the watcher + API (usually in-cluster)
+  PROG trackers            List the built-in change trackers
+  PROG version
 
 Examples:
-  whatchanged --since 30m -n payments
-  whatchanged suspects -n payments --at 10m
-  whatchanged push --source github-actions --name api --summary "deploy v1.4.2" --url "$RUN_URL"
+  PROG --since 30m -n payments
+  PROG suspects -n payments --at 10m
+  PROG --flag manual,freeze --since 7d
+  PROG push --source github-actions --name api --summary "deploy v1.4.2" --url "$RUN_URL"
+
+Connecting:
+  By default PROG talks to WHATCHANGED_URL (or http://localhost:8080).
+  With --port-forward (the default for kubectl whatchanged) it runs
+  "kubectl port-forward" to svc/whatchanged in the whatchanged namespace
+  for you. Use --install-namespace, --service, --context and --kubeconfig
+  to point it elsewhere.
 
 Environment:
-  WHATCHANGED_URL     API address for list/suspects/push (default http://localhost:8080)
-  WHATCHANGED_TOKEN   Bearer token for push
+  WHATCHANGED_URL        API address
+  WHATCHANGED_TOKEN      Bearer token for push and for mcp's record_change
+  WHATCHANGED_NAMESPACE  Namespace whatchanged is installed in (port-forward)
+  WHATCHANGED_SERVICE    Service name (port-forward)
 
-Run 'whatchanged <command> -h' for command flags.
-`
+Run 'PROG <command> -h' for command flags.
+`, "PROG", prog())
+}
 
 // Main runs the CLI and returns the process exit code.
 func Main(args []string, stdout, stderr io.Writer) int {
@@ -55,11 +84,15 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	var err error
 	switch cmd {
 	case "list", "ls", "changes":
-		err = runList(args, stdout)
+		err = runList(args, stdout, stderr)
 	case "suspects", "why":
-		err = runSuspects(args, stdout)
+		err = runSuspects(args, stdout, stderr)
+	case "show", "get", "diff":
+		err = runShow(args, stdout, stderr)
 	case "push":
-		err = runPush(args, stdout)
+		err = runPush(args, stdout, stderr)
+	case "mcp":
+		err = runMCP(args, stdout, stderr)
 	case "server", "serve":
 		err = runServer(args, stderr)
 	case "trackers":
@@ -73,9 +106,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	case "version", "--version":
 		fmt.Fprintf(stdout, "whatchanged %s (%s)\n", Version, Commit)
 	case "help", "-h", "--help":
-		fmt.Fprint(stdout, usage)
+		fmt.Fprint(stdout, usage())
 	default:
-		fmt.Fprintf(stderr, "unknown command %q\n\n%s", cmd, usage)
+		fmt.Fprintf(stderr, "unknown command %q\n\n%s", cmd, usage())
 		return 2
 	}
 	if errors.Is(err, flag.ErrHelp) {
@@ -95,38 +128,45 @@ func envOr(key, def string) string {
 	return def
 }
 
-// common flags for client commands
-type clientFlags struct {
-	server    string
+type outFlags struct {
 	namespace string
 	output    string
 }
 
-func (c *clientFlags) register(fs *flag.FlagSet) {
-	fs.StringVar(&c.server, "server", envOr("WHATCHANGED_URL", "http://localhost:8080"), "whatchanged API address")
-	fs.StringVar(&c.namespace, "namespace", "", "namespace(s), comma separated")
-	fs.StringVar(&c.namespace, "n", "", "shorthand for --namespace")
-	fs.StringVar(&c.output, "o", "table", "output: table, wide or json")
+func (o *outFlags) register(fs *flag.FlagSet) {
+	fs.StringVar(&o.namespace, "namespace", "", "namespace(s), comma separated")
+	fs.StringVar(&o.namespace, "n", "", "shorthand for --namespace")
+	fs.StringVar(&o.output, "o", "table", "output: table, wide or json")
 }
 
-func runList(args []string, out io.Writer) error {
+func runList(args []string, out, stderr io.Writer) error {
 	fs := flag.NewFlagSet("list", flag.ContinueOnError)
-	var cf clientFlags
+	fs.SetOutput(stderr)
+	var cf connFlags
 	cf.register(fs)
+	var of outFlags
+	of.register(fs)
 	since := fs.String("since", "1h", "how far back: 30m, 2h, 1d or RFC 3339")
 	until := fs.String("until", "", "end of range (default now)")
 	kind := fs.String("kind", "", "kind(s), e.g. Deployment,ConfigMap")
 	source := fs.String("source", "", "source(s), e.g. kubernetes,helm,argocd,github-actions")
 	action := fs.String("action", "", "action(s), e.g. image,config,release")
 	impact := fs.String("impact", "", "minimum impact: low, medium, high")
+	flags := fs.String("flag", "", "only flagged changes: manual, off-hours, freeze")
 	text := fs.String("q", "", "free-text search")
 	noWarn := fs.Bool("no-warnings", false, "hide Warning events")
 	limit := fs.Int("limit", 200, "maximum results")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	c, done, err := cf.connect(stderr)
+	if err != nil {
+		return err
+	}
+	defer done()
 	q := url.Values{"since": {*since}, "limit": {fmt.Sprint(*limit)}}
-	for k, v := range map[string]string{"until": *until, "namespace": cf.namespace, "kind": *kind, "source": *source, "action": *action, "impact": *impact, "q": *text} {
+	for k, v := range map[string]string{"until": *until, "namespace": of.namespace, "kind": *kind, "source": *source,
+		"action": *action, "impact": *impact, "flag": *flags, "q": *text} {
 		if v != "" {
 			q.Set(k, v)
 		}
@@ -134,40 +174,48 @@ func runList(args []string, out io.Writer) error {
 	if *noWarn {
 		q.Set("signals", "false")
 	}
-	var res api.ChangesResponse
-	if err := newClient(cf.server, "").do("GET", "/api/v1/changes", q, nil, &res); err != nil {
+	res, err := c.Changes(q)
+	if err != nil {
 		return err
 	}
-	if cf.output == "json" {
+	if of.output == "json" {
 		return printJSON(out, res)
 	}
 	if len(res.Changes) == 0 {
 		fmt.Fprintf(out, "Nothing changed since %s.\n", res.Since.Local().Format("15:04 Mon 2 Jan"))
 		return nil
 	}
-	printChanges(out, res.Changes, nil, cf.output == "wide")
+	render.Changes(out, res.Changes, render.Options{Wide: of.output == "wide", Color: render.ColorOK(out)})
 	return nil
 }
 
-func runSuspects(args []string, out io.Writer) error {
+func runSuspects(args []string, out, stderr io.Writer) error {
 	fs := flag.NewFlagSet("suspects", flag.ContinueOnError)
-	var cf clientFlags
+	fs.SetOutput(stderr)
+	var cf connFlags
 	cf.register(fs)
+	var of outFlags
+	of.register(fs)
 	at := fs.String("at", "now", "when the problem started: now, 10m (ago) or RFC 3339")
 	window := fs.String("window", "1h", "how far before --at to look")
 	limit := fs.Int("limit", 10, "maximum suspects")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	q := url.Values{"at": {*at}, "window": {*window}, "limit": {fmt.Sprint(*limit)}}
-	if cf.namespace != "" {
-		q.Set("namespace", cf.namespace)
-	}
-	var res api.SuspectsResponse
-	if err := newClient(cf.server, "").do("GET", "/api/v1/suspects", q, nil, &res); err != nil {
+	c, done, err := cf.connect(stderr)
+	if err != nil {
 		return err
 	}
-	if cf.output == "json" {
+	defer done()
+	q := url.Values{"at": {*at}, "window": {*window}, "limit": {fmt.Sprint(*limit)}}
+	if of.namespace != "" {
+		q.Set("namespace", of.namespace)
+	}
+	res, err := c.Suspects(q)
+	if err != nil {
+		return err
+	}
+	if of.output == "json" {
 		return printJSON(out, res)
 	}
 	if len(res.Suspects) == 0 {
@@ -177,21 +225,56 @@ func runSuspects(args []string, out io.Writer) error {
 	fmt.Fprintf(out, "Most likely culprits for a problem at %s (%s window, %d warning event(s)):\n\n",
 		res.At.Local().Format("15:04 Mon 2 Jan"), res.Window, res.Warnings)
 	cs := make([]change.Change, len(res.Suspects))
-	scores := make([]string, len(res.Suspects))
+	scores := make([]int, len(res.Suspects))
 	for i, s := range res.Suspects {
-		cs[i] = s.Change
-		scores[i] = fmt.Sprint(s.Score)
+		cs[i], scores[i] = s.Change, s.Score
 	}
-	printChanges(out, cs, scores, cf.output == "wide")
-	if cf.output == "wide" {
-		return nil
-	}
+	render.Changes(out, cs, render.Options{Wide: of.output == "wide", Color: render.ColorOK(out), Scores: scores})
 	fmt.Fprintln(out)
 	for i, s := range res.Suspects {
 		if i == 3 {
 			break
 		}
 		fmt.Fprintf(out, "#%d %s: %s\n", i+1, s.Object(), strings.Join(s.Reasons, ", "))
+	}
+	fmt.Fprintf(out, "\nSee the diff: %s show %s\n", prog(), render.ShortID(res.Suspects[0].ID))
+	return nil
+}
+
+func runShow(args []string, out, stderr io.Writer) error {
+	fs := flag.NewFlagSet("show", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var cf connFlags
+	cf.register(fs)
+	output := fs.String("o", "text", "output: text or json")
+	var id string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		id, args = args[0], args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if id == "" {
+		id = fs.Arg(0)
+	}
+	if id == "" {
+		return errors.New("usage: " + prog() + " show <id> (use -o wide on list to see IDs)")
+	}
+	c, done, err := cf.connect(stderr)
+	if err != nil {
+		return err
+	}
+	defer done()
+	ch, err := c.Change(id)
+	if err != nil {
+		return err
+	}
+	if *output == "json" {
+		return printJSON(out, ch)
+	}
+	render.Detail(out, ch, render.ColorOK(out))
+	if len(ch.Diff) == 0 && !ch.IsSignal() {
+		fmt.Fprintln(out, "\n(no diff recorded for this change)")
 	}
 	return nil
 }
@@ -208,10 +291,11 @@ func (l labelsFlag) Set(v string) error {
 	return nil
 }
 
-func runPush(args []string, out io.Writer) error {
+func runPush(args []string, out, stderr io.Writer) error {
 	fs := flag.NewFlagSet("push", flag.ContinueOnError)
-	server := fs.String("server", envOr("WHATCHANGED_URL", "http://localhost:8080"), "whatchanged API address")
-	token := fs.String("token", "", "bearer token (default $WHATCHANGED_TOKEN)")
+	fs.SetOutput(stderr)
+	var cf connFlags
+	cf.register(fs)
 	var c change.Change
 	labels := labelsFlag{}
 	fs.StringVar(&c.Source, "source", "", "where the change came from, e.g. github-actions, terraform (required)")
@@ -247,15 +331,16 @@ func runPush(args []string, out io.Writer) error {
 	if c.Source == "" {
 		return errors.New("--source is required")
 	}
-	tok := *token
-	if tok == "" {
-		tok = os.Getenv("WHATCHANGED_TOKEN")
-	}
-	if tok == "" {
+	if cf.token() == "" {
 		return errors.New("a token is required: set WHATCHANGED_TOKEN or --token")
 	}
-	var res api.IngestResponse
-	if err := newClient(*server, tok).do("POST", "/api/v1/changes", nil, c, &res); err != nil {
+	cl, done, err := cf.connect(stderr)
+	if err != nil {
+		return err
+	}
+	defer done()
+	res, err := cl.Push(c)
+	if err != nil {
 		return err
 	}
 	if res.Accepted == 0 {
@@ -266,89 +351,27 @@ func runPush(args []string, out io.Writer) error {
 	return nil
 }
 
+func runMCP(args []string, out, stderr io.Writer) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var cf connFlags
+	cf.register(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	c, done, err := cf.connect(stderr)
+	if err != nil {
+		return err
+	}
+	defer done()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	s := &mcp.Server{Client: c, Version: Version}
+	return s.ServeStdio(ctx, Stdin, out)
+}
+
 func printJSON(out io.Writer, v any) error {
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
-}
-
-func colorOK(out io.Writer) bool {
-	if os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	f, ok := out.(*os.File)
-	if !ok {
-		return false
-	}
-	st, err := f.Stat()
-	return err == nil && st.Mode()&os.ModeCharDevice != 0
-}
-
-func paintImpact(c change.Change, color bool) string {
-	label := string(c.Impact)
-	if c.IsSignal() {
-		label = "warn"
-	}
-	if !color {
-		return label
-	}
-	code := map[string]string{"high": "31", "medium": "33", "low": "34", "warn": "90"}[label]
-	return "\x1b[" + code + "m" + label + "\x1b[0m"
-}
-
-func shortAge(t time.Time) string {
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return fmt.Sprintf("%ds", max(0, int(d.Seconds())))
-	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	case d < 48*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
-	default:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
-	}
-}
-
-func clip(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n-1]) + "…"
-	}
-	return s
-}
-
-func printChanges(out io.Writer, cs []change.Change, scores []string, wide bool) {
-	color := colorOK(out)
-	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-	header := "AGE\tIMPACT\tSOURCE\tNAMESPACE\tOBJECT\tCHANGE"
-	if scores != nil {
-		header = "SCORE\t" + header
-	}
-	if wide {
-		header += "\tACTOR\tTIME"
-	}
-	fmt.Fprintln(tw, header)
-	for i, c := range cs {
-		ns := c.Namespace
-		if ns == "" {
-			ns = "-"
-		}
-		summary := c.Summary
-		if !wide {
-			summary = clip(summary, 70)
-		}
-		row := fmt.Sprintf("%s\t%s\t%s\t%s\t%s\t%s", shortAge(c.Time), paintImpact(c, color), c.Source, ns, clip(c.Object(), 48), summary)
-		if scores != nil {
-			row = scores[i] + "\t" + row
-		}
-		if wide {
-			actor := c.Actor
-			if actor == "" {
-				actor = "-"
-			}
-			row += "\t" + actor + "\t" + c.Time.Local().Format(time.RFC3339)
-		}
-		fmt.Fprintln(tw, row)
-	}
-	tw.Flush()
 }

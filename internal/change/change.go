@@ -77,7 +77,29 @@ type Change struct {
 	Actor     string            `json:"actor,omitempty"`
 	URL       string            `json:"url,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty"`
+	// Flags are risk markers such as "manual", "off-hours" or "freeze".
+	Flags []string `json:"flags,omitempty"`
+	// Diff is a redacted, line-based diff of the object ("- path: old",
+	// "+ path: new"). Only populated where diffs are enabled.
+	Diff []string `json:"diff,omitempty"`
 }
+
+// HasFlag reports whether the change carries flag f.
+func (c Change) HasFlag(f string) bool {
+	for _, x := range c.Flags {
+		if x == f {
+			return true
+		}
+	}
+	return false
+}
+
+// Well-known flags.
+const (
+	FlagManual   = "manual"
+	FlagOffHours = "off-hours"
+	FlagFreeze   = "freeze"
+)
 
 // Object returns "kind/name" for display.
 func (c Change) Object() string {

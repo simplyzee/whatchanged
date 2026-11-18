@@ -3,7 +3,6 @@ package tracker
 import (
 	"encoding/json"
 	"strings"
-	"time"
 
 	"github.com/simplyzee/whatchanged/internal/change"
 	"github.com/simplyzee/whatchanged/internal/kube"
@@ -61,6 +60,7 @@ func diffData(e Emitter, noun string, old, cur dataObj) {
 
 func dataSpec(name, kind, noun string, res kube.Resource, skip func(name, typ string) bool) Spec[dataObj] {
 	return Spec[dataObj]{
+		Diffable:  kind == "ConfigMap", // Secrets are never diffed
 		Name:      name,
 		Kind:      kind,
 		Source:    "kubernetes",
@@ -81,18 +81,18 @@ func dataSpec(name, kind, noun string, res kube.Resource, skip func(name, typ st
 }
 
 // ConfigMaps tracks data changes in ConfigMaps.
-func ConfigMaps(sink Sink, now func() time.Time) Tracker {
+func ConfigMaps(env Env) Tracker {
 	skip := func(name, _ string) bool { return name == "kube-root-ca.crt" }
-	return New(dataSpec("configmaps", "ConfigMap", "data", kube.Resource{Path: "/api/v1/configmaps"}, skip), sink, now)
+	return New(dataSpec("configmaps", "ConfigMap", "data", kube.Resource{Path: "/api/v1/configmaps"}, skip), env)
 }
 
 // Secrets tracks which keys changed in Secrets. Values are hashed in memory
 // and never stored or logged. Helm release and service-account token
 // secrets are ignored.
-func Secrets(sink Sink, now func() time.Time) Tracker {
+func Secrets(env Env) Tracker {
 	skip := func(_, typ string) bool {
 		return typ == "helm.sh/release.v1" || typ == "kubernetes.io/service-account-token"
 	}
 	res := kube.Resource{Path: "/api/v1/secrets", FieldSelector: "type!=helm.sh/release.v1"}
-	return New(dataSpec("secrets", "Secret", "secret", res, skip), sink, now)
+	return New(dataSpec("secrets", "Secret", "secret", res, skip), env)
 }

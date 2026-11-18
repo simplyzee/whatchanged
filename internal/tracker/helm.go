@@ -70,7 +70,7 @@ func emitHelm(e Emitter, m Meta, r helmRelease, rollback bool, includeStatus boo
 func pending(status string) bool { return strings.HasPrefix(status, "pending") }
 
 // Helm tracks Helm 3 releases via their storage Secrets.
-func Helm(sink Sink, now func() time.Time) Tracker {
+func Helm(env Env) Tracker {
 	return New(Spec[helmRelease]{
 		Name:   "helm-releases",
 		Kind:   "HelmRelease",
@@ -98,5 +98,5 @@ func Helm(sink Sink, now func() time.Time) Tracker {
 				emitHelm(e, m, r, false, r.Status != "superseded")
 			}
 		},
-	}, sink, now)
+	}, env)
 }

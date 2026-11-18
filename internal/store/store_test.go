@@ -130,3 +130,30 @@ func TestMaxItems(t *testing.T) {
 		t.Error("evicted id should be addable again")
 	}
 }
+
+func TestGetByPrefixAndFlags(t *testing.T) {
+	s, _ := Open(Options{Now: func() time.Time { return base }})
+	a := mk("abcdef123456", 5, "x", change.ImpactLow, "scale")
+	a.Flags = []string{change.FlagManual}
+	s.Add(a)
+	s.Add(mk("abcdff999999", 4, "x", change.ImpactLow, "scale"))
+	if c, ok, err := s.Get("abcdef123456"); !ok || err != nil || c.ID != a.ID {
+		t.Errorf("exact get: %v %v", ok, err)
+	}
+	if c, ok, _ := s.Get("abcdef"); !ok || c.ID != a.ID {
+		t.Error("prefix get")
+	}
+	if _, _, err := s.Get("abcd"); err != nil {
+		t.Error("short prefixes are not searched")
+	}
+	if _, _, err := s.Get("abcd" + "f"); err != nil {
+		t.Errorf("unique 5-char prefix is too short to match, not an error: %v", err)
+	}
+	s.Add(mk("abcdef777777", 3, "x", change.ImpactLow, "scale"))
+	if _, _, err := s.Get("abcdef"); err != ErrAmbiguous {
+		t.Errorf("want ambiguous, got %v", err)
+	}
+	if got := s.Query(Filter{Flags: []string{"manual", "freeze"}}); len(got) != 1 || got[0].ID != a.ID {
+		t.Errorf("flag filter: %+v", got)
+	}
+}

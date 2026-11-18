@@ -66,3 +66,58 @@ func ids(s []Suspect) []string {
 	}
 	return out
 }
+
+type fakeRel struct{}
+
+func (fakeRel) Owner(ns, kind, name string) string {
+	if kind == "Pod" && strings.HasPrefix(name, "api-") {
+		return "Deployment/api"
+	}
+	return ""
+}
+
+func (fakeRel) Related(ns, kind, name string) []string {
+	switch kind {
+	case "Deployment":
+		return []string{kind + "/" + name}
+	case "ConfigMap":
+		if name == "api-config" {
+			return []string{"Deployment/api"}
+		}
+	}
+	return nil
+}
+
+func TestOwnerCorrelationAndFlags(t *testing.T) {
+	at := time.Date(2026, 11, 17, 19, 0, 0, 0, time.UTC)
+	mk := func(id, kind, name string, minsAgo int, impact change.Impact, action string) change.Change {
+		return change.Change{ID: id, Kind: kind, Name: name, Namespace: "payments", Time: at.Add(-time.Duration(minsAgo) * time.Minute),
+			Impact: impact, Action: action, Summary: action}
+	}
+	cm := mk("cm", "ConfigMap", "api-config", 10, change.ImpactMedium, "config")
+	other := mk("web", "Deployment", "web", 9, change.ImpactHigh, "image") // more impactful, but its pods are fine
+	flagged := mk("flagged", "Deployment", "worker", 30, change.ImpactMedium, "config")
+	flagged.Flags = []string{change.FlagManual, change.FlagOffHours}
+	flagged.Actor = "kubectl-edit"
+	w := func(id string, minsAgo int, pod string) change.Change {
+		c := mk(id, "Pod", pod, minsAgo, change.ImpactLow, change.ActionWarning)
+		c.Summary = "BackOff: crash"
+		return c
+	}
+	records := []change.Change{cm, other, flagged, w("w1", 8, "api-1"), w("w2", 7, "api-2"), w("w3", 6, "api-3")}
+	got := Rank(records, Query{At: at, Window: time.Hour, Namespaces: []string{"payments"}, Relations: fakeRel{}})
+	if got[0].ID != "cm" {
+		t.Fatalf("ConfigMap used by the failing workload should rank first, got %v", ids(got))
+	}
+	if !strings.Contains(strings.Join(got[0].Reasons, "|"), "pods of Deployment/api (which use it) then failed: 3 warning(s): BackOff") {
+		t.Errorf("reasons: %v", got[0].Reasons)
+	}
+	for _, s := range got {
+		if s.ID == "flagged" {
+			r := strings.Join(s.Reasons, "|")
+			if !strings.Contains(r, "manual change (kubectl-edit)") || !strings.Contains(r, "outside business hours") {
+				t.Errorf("flag reasons: %v", s.Reasons)
+			}
+		}
+	}
+}

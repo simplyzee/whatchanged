@@ -76,7 +76,7 @@ func deployment(rv string, gen int, replicas int, image string, env string, rest
 
 func TestDeploymentDiffs(t *testing.T) {
 	var c collector
-	tr := Deployments(c.sink, now)
+	tr := Deployments(Env{Sink: c.sink, Now: now})
 	tr.Replace([]json.RawMessage{raw(t, deployment("1", 1, 3, "ghcr.io/acme/api:1.2.0", "a", ""))}, true)
 	if got := c.take(); len(got) != 0 {
 		t.Fatalf("initial sync must be silent, got %v", got)
@@ -138,7 +138,7 @@ func TestDeploymentDiffs(t *testing.T) {
 
 func TestRelistDetectsMissedChanges(t *testing.T) {
 	var c collector
-	tr := Deployments(c.sink, now)
+	tr := Deployments(Env{Sink: c.sink, Now: now})
 	tr.Replace([]json.RawMessage{raw(t, deployment("1", 1, 3, "img:1", "a", ""))}, true)
 
 	other := deployment("7", 1, 1, "worker:1", "a", "")
@@ -172,7 +172,7 @@ func configMap(rv string, data obj) obj {
 
 func TestConfigMapKeys(t *testing.T) {
 	var c collector
-	tr := ConfigMaps(c.sink, now)
+	tr := ConfigMaps(Env{Sink: c.sink, Now: now})
 	tr.Replace([]json.RawMessage{raw(t, configMap("1", obj{"a": "1", "b": "2", "c": "3"}))}, true)
 	tr.Apply(kube.Event{Type: "MODIFIED", Object: raw(t, configMap("2", obj{"a": "1", "b": "changed", "d": "4"}))})
 	got := c.take()
@@ -204,7 +204,7 @@ func itoa(i int) string { return strconv.Itoa(i) }
 
 func TestHelmLifecycleAndBackfillDedupe(t *testing.T) {
 	var c collector
-	tr := Helm(c.sink, now)
+	tr := Helm(Env{Sink: c.sink, Now: now})
 	// Backfill: rev 1 superseded, rev 2 deployed
 	tr.Replace([]json.RawMessage{
 		raw(t, helmSecret("h1", "1", "api", 1, "superseded", "2026-11-16T10:00:00Z")),
@@ -234,7 +234,7 @@ func TestHelmLifecycleAndBackfillDedupe(t *testing.T) {
 
 	// The same revision seen again after a restart has the same ID.
 	var c2 collector
-	tr2 := Helm(c2.sink, now)
+	tr2 := Helm(Env{Sink: c2.sink, Now: now})
 	tr2.Replace([]json.RawMessage{raw(t, helmSecret("h3", "9", "api", 3, "failed", "2026-11-17T18:50:00Z"))}, true)
 	again := c2.take()
 	if len(again) != 1 || again[0].ID != got[0].ID {
@@ -244,7 +244,7 @@ func TestHelmLifecycleAndBackfillDedupe(t *testing.T) {
 
 func TestNodeTransitions(t *testing.T) {
 	var c collector
-	tr := Nodes(c.sink, now)
+	tr := Nodes(Env{Sink: c.sink, Now: now})
 	n := func(rv string, unsched bool, ready, kubelet string) json.RawMessage {
 		return raw(t, obj{
 			"metadata": obj{"name": "node-a", "uid": "n1", "resourceVersion": rv},
@@ -275,7 +275,7 @@ func TestNodeTransitions(t *testing.T) {
 
 func TestWarningEventsBackfillAndLive(t *testing.T) {
 	var c collector
-	tr := WarningEvents(c.sink, now)
+	tr := WarningEvents(Env{Sink: c.sink, Now: now})
 	ev := func(uid, reason, ts string) json.RawMessage {
 		return raw(t, obj{
 			"metadata":       obj{"name": "x." + uid, "namespace": "payments", "uid": uid, "resourceVersion": "1"},
@@ -296,7 +296,7 @@ func TestWarningEventsBackfillAndLive(t *testing.T) {
 
 func TestArgoSync(t *testing.T) {
 	var c collector
-	tr := ArgoApplications(c.sink, now)
+	tr := ArgoApplications(Env{Sink: c.sink, Now: now})
 	app := func(rv, rev, health string) json.RawMessage {
 		return raw(t, obj{
 			"metadata": obj{"name": "payments", "namespace": "argocd", "uid": "a1", "resourceVersion": rv},
@@ -321,7 +321,7 @@ func TestArgoSync(t *testing.T) {
 }
 
 func TestSelect(t *testing.T) {
-	ts, err := Select([]string{"secrets"}, []string{"warning-events"}, func(change.Change) {}, nil)
+	ts, err := Select([]string{"secrets"}, []string{"warning-events"}, Env{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +332,7 @@ func TestSelect(t *testing.T) {
 	if !names["secrets"] || names["warning-events"] || !names["deployments"] {
 		t.Errorf("unexpected selection: %v", names)
 	}
-	if _, err := Select([]string{"nope"}, nil, func(change.Change) {}, nil); err == nil {
+	if _, err := Select([]string{"nope"}, nil, Env{}); err == nil {
 		t.Error("unknown tracker should error")
 	}
 }

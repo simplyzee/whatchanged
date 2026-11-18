@@ -18,6 +18,7 @@ type Suspect struct {
 	change.Change
 	Score   int      `json:"score"`
 	Reasons []string `json:"reasons"`
+	raw     float64
 }
 
 // Query describes the problem being investigated.
@@ -26,11 +27,25 @@ type Query struct {
 	Window     time.Duration // how far back to look
 	Namespaces []string      // where the problem is (optional)
 	Limit      int
+	// Relations links symptoms to changes (optional).
+	Relations Relations
+}
+
+// Relations knows how objects relate. tracker.Graph implements it.
+type Relations interface {
+	// Owner returns the top-level controller ("Deployment/api") of an object.
+	Owner(ns, kind, name string) string
+	// Related returns the workloads a change to (kind, name) can affect.
+	Related(ns, kind, name string) []string
 }
 
 // warningLink is how long after a change a Warning event still counts as
 // "probably caused by it".
 const warningLink = 15 * time.Minute
+
+// eventSlack tolerates Event timestamps having one-second resolution (and
+// a little clock skew) relative to when we observed the change.
+const eventSlack = 5 * time.Second
 
 // Rank scores candidate changes. records may contain signals (Warning
 // events); they are used as evidence but never returned as suspects.
@@ -79,31 +94,81 @@ func Rank(records []change.Change, q Query) []Suspect {
 			}
 		}
 
-		// Symptoms that appeared shortly after the change, nearby.
-		reasons := map[string]int{}
-		n := 0
+		// Symptoms that appeared shortly after the change. Symptoms on the
+		// workloads this change affects are strong evidence; anything else
+		// in the same namespace is weak evidence.
+		related := map[string]bool{}
+		if q.Relations != nil {
+			for _, r := range q.Relations.Related(c.Namespace, c.Kind, c.Name) {
+				related[r] = true
+			}
+		}
+		direct, nearby := map[string]int{}, map[string]int{}
+		nd, nn := 0, 0
 		for _, w := range signals {
-			if w.Time.Before(c.Time) || w.Time.Sub(c.Time) > warningLink || w.Time.After(q.At.Add(warningLink)) {
+			if w.Time.Before(c.Time.Add(-eventSlack)) || w.Time.Sub(c.Time) > warningLink || w.Time.After(q.At.Add(warningLink)) {
 				continue
 			}
 			if c.Namespace != "" && w.Namespace != c.Namespace {
 				continue
 			}
-			n++
 			reason, _, _ := strings.Cut(w.Summary, ":")
-			reasons[reason]++
+			owner := w.Labels["owner"]
+			if owner == "" && q.Relations != nil {
+				owner = q.Relations.Owner(w.Namespace, w.Kind, w.Name)
+			}
+			if owner != "" && related[owner] {
+				nd++
+				direct[reason]++
+				continue
+			}
+			if owner != "" && len(related) > 0 {
+				continue // a known, different workload: not evidence for this change
+			}
+			nn++
+			nearby[reason]++
 		}
-		if n > 0 {
-			score *= 1 + math.Min(0.6, 0.12*float64(n))
-			s.Reasons = append(s.Reasons, fmt.Sprintf("followed by %d warning(s): %s", n, topReasons(reasons, 3)))
+		if nd > 0 {
+			score *= 1 + math.Min(1.0, 0.3*float64(nd))
+			who := "its pods"
+			if c.Kind == "ConfigMap" || c.Kind == "Secret" {
+				var ws []string
+				for w := range related {
+					ws = append(ws, w)
+				}
+				sort.Strings(ws)
+				who = "pods of " + strings.Join(ws, ", ") + " (which use it)"
+			}
+			s.Reasons = append(s.Reasons, fmt.Sprintf("%s then failed: %d warning(s): %s", who, nd, topReasons(direct, 3)))
+		}
+		if nn > 0 {
+			score *= 1 + math.Min(0.6, 0.12*float64(nn))
+			s.Reasons = append(s.Reasons, fmt.Sprintf("followed by %d warning(s): %s", nn, topReasons(nearby, 3)))
 		}
 
-		s.Score = int(math.Round(math.Min(score, 1) * 100))
+		// Risk flags.
+		if c.HasFlag(change.FlagFreeze) {
+			score *= 1.2
+			s.Reasons = append(s.Reasons, "made during a change freeze")
+		}
+		if c.HasFlag(change.FlagManual) {
+			score *= 1.15
+			s.Reasons = append(s.Reasons, "manual change ("+c.Actor+")")
+		}
+		if c.HasFlag(change.FlagOffHours) {
+			score *= 1.1
+			s.Reasons = append(s.Reasons, "made outside business hours")
+		}
+
+		// Map the unbounded raw score onto 0–100 without saturating, so
+		// strong evidence still separates suspects at the top.
+		s.raw = score
+		s.Score = int(math.Round(100 * score / (score + 0.4)))
 		out = append(out, s)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Score != out[j].Score {
-			return out[i].Score > out[j].Score
+		if out[i].raw != out[j].raw {
+			return out[i].raw > out[j].raw
 		}
 		return out[i].Time.After(out[j].Time)
 	})

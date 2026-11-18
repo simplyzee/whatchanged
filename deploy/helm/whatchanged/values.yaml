@@ -30,6 +30,20 @@ trackers:
   excludeNamespaces:
     - kube-node-lease
 
+# -- Record a line diff for each change: off, redacted (default: env var
+# values, ConfigMap data and secret-looking keys are hashed) or full.
+# Secret data is never diffed.
+diffs: redacted
+
+risk:
+  # -- Flag changes made outside these hours ("off" to disable).
+  businessHours: "Mon-Fri 08:00-18:00"
+  # -- Time zone for businessHours and freeze dates.
+  timezone: UTC
+  # -- Change freezes: "[name=]start/end", dates inclusive, e.g.
+  # ["xmas=2026-12-20/2027-01-03"]. Changes inside are flagged "freeze".
+  freezes: []
+
 ingest:
   # -- Accept changes pushed from CI, Terraform, feature flags… via
   # POST /api/v1/changes.

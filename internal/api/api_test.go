@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/simplyzee/whatchanged/internal/change"
 	"github.com/simplyzee/whatchanged/internal/store"
 )
 
@@ -102,5 +103,38 @@ func TestBadQueries(t *testing.T) {
 		if resp.StatusCode != 200 {
 			t.Errorf("%s: %d", p, resp.StatusCode)
 		}
+	}
+}
+
+func TestGetChangeAndDiffOmission(t *testing.T) {
+	st, _ := store.Open(store.Options{})
+	now := time.Now().UTC()
+	st.Add(change.Change{ID: "abcdef999", Time: now.Add(-time.Minute), Source: "kubernetes", Name: "api", Action: "image",
+		Impact: change.ImpactHigh, Flags: []string{"manual"}, Diff: []string{"- a: 1", "+ a: 2"}})
+	hs := httptest.NewServer((&Server{Store: st}).Handler())
+	defer hs.Close()
+	get := func(p string) (int, string) {
+		resp, err := http.Get(hs.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, body := get("/api/v1/changes?since=1h"); code != 200 || strings.Contains(body, `"diff"`) {
+		t.Errorf("list should omit diffs: %s", body)
+	}
+	if _, body := get("/api/v1/changes?since=1h&diff=true"); !strings.Contains(body, `"+ a: 2"`) {
+		t.Errorf("diff=true should include diffs: %s", body)
+	}
+	if code, body := get("/api/v1/changes/abcdef"); code != 200 || !strings.Contains(body, `"+ a: 2"`) {
+		t.Errorf("get by prefix: %d %s", code, body)
+	}
+	if code, _ := get("/api/v1/changes/zzzzzzzz"); code != 404 {
+		t.Errorf("missing: %d", code)
+	}
+	if _, body := get("/api/v1/changes?since=1h&flag=freeze"); !strings.Contains(body, `"count": 0`) {
+		t.Errorf("flag filter: %s", body)
 	}
 }

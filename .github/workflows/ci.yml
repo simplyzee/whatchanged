@@ -58,30 +58,54 @@ jobs:
         run: |
           helm install wc deploy/helm/whatchanged -n whatchanged --create-namespace \
             --set image.tag=ci --set image.pullPolicy=Never --wait --timeout 3m
+          kubectl -n whatchanged get svc
       - name: Make some changes
         run: |
           kubectl create deployment demo --image=nginx:1.27-alpine
           kubectl rollout status deploy/demo --timeout=2m
           kubectl create configmap demo-config --from-literal=MODE=a
+          kubectl expose deploy/demo --port=80
+          kubectl create ingress demo --rule="demo.example.com/*=demo:80"
+          kubectl autoscale deploy/demo --min=1 --max=3 --cpu-percent=80
+          kubectl create clusterrolebinding demo-admin --clusterrole=view --user=alice
+          sleep 5
           kubectl set image deploy/demo nginx=nginx:1.27.3-alpine
           kubectl patch configmap demo-config -p '{"data":{"MODE":"b"}}'
           kubectl scale deploy/demo --replicas=2
-      - name: Check whatchanged saw them
+          kubectl patch service demo -p '{"spec":{"selector":{"app":"demo-canary"}}}'
+          kubectl patch hpa demo -p '{"spec":{"maxReplicas":5}}'
+          kubectl patch clusterrolebinding demo-admin --type=json -p '[{"op":"add","path":"/subjects/-","value":{"kind":"User","name":"bob","apiGroup":"rbac.authorization.k8s.io"}}]'
+          kubectl annotate ingress demo konghq.com/plugins=rate-limit
+      - name: Check whatchanged saw them (kubectl plugin, via its own port-forward)
+        env:
+          WHATCHANGED_SERVICE: wc-whatchanged
         run: |
-          kubectl -n whatchanged port-forward svc/wc-whatchanged 8080:8080 &
-          sleep 3
-          go build -o wc ./cmd/whatchanged
+          mkdir -p "$HOME/bin" && export PATH="$HOME/bin:$PATH"
+          go build -o "$HOME/bin/kubectl-whatchanged" ./cmd/whatchanged
           for i in $(seq 1 30); do
-            out=$(./wc -n default --since 10m -o json)
-            if echo "$out" | grep -q '"action": "image"' \
-              && echo "$out" | grep -q '"action": "scale"' \
-              && echo "$out" | grep -q 'keys changed MODE'; then
-              ./wc -n default --since 10m
-              ./wc suspects -n default
+            out=$(kubectl whatchanged --since 10m -o json)
+            ok=1
+            for want in '"action": "image"' '"action": "scale"' 'keys changed MODE' 'changed selector' \
+                        'maxReplicas 3 → 5' 'granted to User:bob' 'annotation konghq.com/plugins' '"flags": \['; do
+              echo "$out" | grep -q "$want" || { ok=0; missing="$want"; }
+            done
+            if [ $ok = 1 ]; then
+              kubectl whatchanged -n default --since 10m -o wide
+              kubectl whatchanged suspects -n default
+              id=$(echo "$out" | jq -r '[.changes[] | select(.action == "image")][0].id')
+              kubectl whatchanged show "$id" | tee /tmp/show.txt
+              grep -q 'nginx:1.27.3-alpine' /tmp/show.txt
               exit 0
             fi
             sleep 2
           done
-          echo "$out"
+          echo "missing: $missing"; echo "$out"
           kubectl -n whatchanged logs deploy/wc-whatchanged
           exit 1
+      - name: Check the MCP endpoint
+        run: |
+          kubectl -n whatchanged port-forward svc/wc-whatchanged 8080:8080 &
+          sleep 3
+          curl -fsS localhost:8080/mcp -H 'Content-Type: application/json' \
+            -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"suspects","arguments":{"namespace":"default"}}}' | tee /tmp/mcp.json
+          grep -q 'score' /tmp/mcp.json

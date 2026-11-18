@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/simplyzee/whatchanged/internal/change"
 	"github.com/simplyzee/whatchanged/internal/kube"
@@ -23,6 +22,8 @@ type workload struct {
 	// Fields maps a short path (e.g. "containers[api].env") to a hash of
 	// its JSON, so we can say *what* in the pod template changed.
 	Fields map[string]string
+	// Refs are the ConfigMaps/Secrets the pod template uses.
+	Refs []string
 }
 
 type rawContainer map[string]json.RawMessage
@@ -83,6 +84,14 @@ func fingerprintTemplate(raw json.RawMessage, w *workload) {
 		b, _ := json.Marshal(tpl.Metadata.Labels)
 		w.Fields["template.labels"] = hashBytes(b)
 	}
+	podSpec := map[string]any{}
+	for k, v := range tpl.Spec {
+		var anyV any
+		if json.Unmarshal(v, &anyV) == nil {
+			podSpec[k] = anyV
+		}
+	}
+	w.Refs = workloadRefs(podSpec)
 	for k, v := range tpl.Spec {
 		if k != "containers" && k != "initContainers" {
 			w.Fields["pod."+k] = hashBytes(v)
@@ -246,33 +255,41 @@ func diffWorkload(e Emitter, old, cur workload) {
 }
 
 func workloadSpec(name, kind, path string) Spec[workload] {
+	refs := func(e Emitter, m Meta, v workload) { e.Graph().SetRefs(m.Namespace, kind+"/"+m.Name, v.Refs) }
 	return Spec[workload]{
 		Name:      name,
 		Kind:      kind,
 		Source:    "kubernetes",
 		Resources: []kube.Resource{{Path: path}},
 		Decode:    decodeWorkload,
+		Diffable:  true,
+		Backfill:  refs,
 		Added: func(e Emitter, m Meta, v workload) {
+			refs(e, m, v)
 			e.Emit(change.ActionCreate, change.ImpactMedium, "created ("+imageList(v.Images)+")", At(m.CreationTimestamp))
 		},
-		Updated: func(e Emitter, _ Meta, old, cur workload) { diffWorkload(e, old, cur) },
-		Deleted: func(e Emitter, _ Meta, _ workload) {
+		Updated: func(e Emitter, m Meta, old, cur workload) {
+			refs(e, m, cur)
+			diffWorkload(e, old, cur)
+		},
+		Deleted: func(e Emitter, m Meta, _ workload) {
+			e.Graph().SetRefs(m.Namespace, kind+"/"+m.Name, nil)
 			e.Emit(change.ActionDelete, change.ImpactMedium, "deleted")
 		},
 	}
 }
 
 // Deployments tracks apps/v1 Deployments.
-func Deployments(sink Sink, now func() time.Time) Tracker {
-	return New(workloadSpec("deployments", "Deployment", "/apis/apps/v1/deployments"), sink, now)
+func Deployments(env Env) Tracker {
+	return New(workloadSpec("deployments", "Deployment", "/apis/apps/v1/deployments"), env)
 }
 
 // StatefulSets tracks apps/v1 StatefulSets.
-func StatefulSets(sink Sink, now func() time.Time) Tracker {
-	return New(workloadSpec("statefulsets", "StatefulSet", "/apis/apps/v1/statefulsets"), sink, now)
+func StatefulSets(env Env) Tracker {
+	return New(workloadSpec("statefulsets", "StatefulSet", "/apis/apps/v1/statefulsets"), env)
 }
 
 // DaemonSets tracks apps/v1 DaemonSets.
-func DaemonSets(sink Sink, now func() time.Time) Tracker {
-	return New(workloadSpec("daemonsets", "DaemonSet", "/apis/apps/v1/daemonsets"), sink, now)
+func DaemonSets(env Env) Tracker {
+	return New(workloadSpec("daemonsets", "DaemonSet", "/apis/apps/v1/daemonsets"), env)
 }

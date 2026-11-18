@@ -46,7 +46,7 @@ func decodeNode(raw json.RawMessage) (Meta, node, error) {
 }
 
 // Nodes tracks node joins/removals, cordons, readiness and kubelet upgrades.
-func Nodes(sink Sink, now func() time.Time) Tracker {
+func Nodes(env Env) Tracker {
 	return New(Spec[node]{
 		Name:      "nodes",
 		Kind:      "Node",
@@ -78,7 +78,7 @@ func Nodes(sink Sink, now func() time.Time) Tracker {
 		Deleted: func(e Emitter, _ Meta, _ node) {
 			e.Emit(change.ActionNode, change.ImpactMedium, "node removed")
 		},
-	}, sink, now)
+	}, env)
 }
 
 // --- Network policies ----------------------------------------------------------
@@ -120,21 +120,21 @@ func policySpec(name, kind, source string, optional bool, path string) Spec[poli
 }
 
 // NetworkPolicies tracks networking.k8s.io NetworkPolicies.
-func NetworkPolicies(sink Sink, now func() time.Time) Tracker {
+func NetworkPolicies(env Env) Tracker {
 	return New(policySpec("networkpolicies", "NetworkPolicy", "kubernetes", false,
-		"/apis/networking.k8s.io/v1/networkpolicies"), sink, now)
+		"/apis/networking.k8s.io/v1/networkpolicies"), env)
 }
 
 // CiliumNetworkPolicies tracks CiliumNetworkPolicies (optional CRD).
-func CiliumNetworkPolicies(sink Sink, now func() time.Time) Tracker {
+func CiliumNetworkPolicies(env Env) Tracker {
 	return New(policySpec("cilium-networkpolicies", "CiliumNetworkPolicy", "cilium", true,
-		"/apis/cilium.io/v2/ciliumnetworkpolicies"), sink, now)
+		"/apis/cilium.io/v2/ciliumnetworkpolicies"), env)
 }
 
 // CiliumClusterwideNetworkPolicies tracks CCNPs (optional CRD).
-func CiliumClusterwideNetworkPolicies(sink Sink, now func() time.Time) Tracker {
+func CiliumClusterwideNetworkPolicies(env Env) Tracker {
 	return New(policySpec("cilium-clusterwidenetworkpolicies", "CiliumClusterwideNetworkPolicy", "cilium", true,
-		"/apis/cilium.io/v2/ciliumclusterwidenetworkpolicies"), sink, now)
+		"/apis/cilium.io/v2/ciliumclusterwidenetworkpolicies"), env)
 }
 
 // --- Warning events ------------------------------------------------------------
@@ -182,17 +182,20 @@ func decodeEvent(raw json.RawMessage) (Meta, warning, error) {
 }
 
 func emitWarning(e Emitter, m Meta, w warning) {
-	e.Emit(change.ActionWarning, change.ImpactLow, w.Reason+": "+truncate(w.Message, 240),
-		Object(w.Kind, w.Namespace, w.Name),
-		At(w.Time),
-		Actor(""),
-		WithID(m.UID),
-	)
+	opts := []Opt{Object(w.Kind, w.Namespace, w.Name), At(w.Time), Actor(""), WithID(m.UID)}
+	owner := e.Graph().Owner(w.Namespace, w.Kind, w.Name)
+	if owner == "" && len(e.Graph().Related(w.Namespace, w.Kind, w.Name)) > 0 {
+		owner = w.Kind + "/" + w.Name // the event is about a workload itself
+	}
+	if owner != "" {
+		opts = append(opts, Label("owner", owner))
+	}
+	e.Emit(change.ActionWarning, change.ImpactLow, w.Reason+": "+truncate(w.Message, 240), opts...)
 }
 
 // WarningEvents records Warning events as signals. They are never ranked as
 // suspects, but they show symptoms on the same timeline as the changes.
-func WarningEvents(sink Sink, now func() time.Time) Tracker {
+func WarningEvents(env Env) Tracker {
 	return New(Spec[warning]{
 		Name:      "warning-events",
 		Kind:      "Event",
@@ -201,5 +204,5 @@ func WarningEvents(sink Sink, now func() time.Time) Tracker {
 		Decode:    decodeEvent,
 		Added:     emitWarning,
 		Backfill:  emitWarning,
-	}, sink, now)
+	}, env)
 }

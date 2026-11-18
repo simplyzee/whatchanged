@@ -13,7 +13,7 @@ import (
 )
 
 // Constructor builds a tracker.
-type Constructor func(Sink, func() time.Time) Tracker
+type Constructor func(Env) Tracker
 
 // Registry lists every built-in tracker. Default reports whether it runs
 // unless explicitly disabled.
@@ -29,13 +29,29 @@ var Registry = []struct {
 	{"secrets", Secrets, false}, // opt-in: needs read access to Secret data
 	{"helm-releases", Helm, true},
 	{"nodes", Nodes, true},
+	{"services", Services, true},
+	{"ingresses", Ingresses, true},
+	{"gateway-api", GatewayAPI, true},
+	{"hpas", HPAs, true},
+	{"keda-scaledobjects", KEDAScaledObjects, true},
+	{"pdbs", PDBs, true},
+	{"priorityclasses", PriorityClasses, true},
+	{"resourcequotas", ResourceQuotas, true},
+	{"limitranges", LimitRanges, true},
+	{"crds", CRDs, true},
+	{"admission", Admission, true},
+	{"rbac", RBAC, true},
 	{"networkpolicies", NetworkPolicies, true},
 	{"cilium-networkpolicies", CiliumNetworkPolicies, true},
 	{"cilium-clusterwidenetworkpolicies", CiliumClusterwideNetworkPolicies, true},
+	{"cilium-networking", CiliumNetworking, true},
+	{"cert-manager", CertManager, true},
+	{"kong", Kong, true},
 	{"argocd-applications", ArgoApplications, true},
 	{"flux-kustomizations", FluxKustomizations, true},
 	{"flux-helmreleases", FluxHelmReleases, true},
 	{"warning-events", WarningEvents, true},
+	{"owner-index", OwnerIndex, true}, // Pod/ReplicaSet/Job metadata, for correlation
 }
 
 // Names returns all tracker names.
@@ -48,7 +64,8 @@ func Names() []string {
 }
 
 // Select builds trackers: defaults, plus enable, minus disable.
-func Select(enable, disable []string, sink Sink, now func() time.Time) ([]Tracker, error) {
+func Select(enable, disable []string, env Env) ([]Tracker, error) {
+	env = env.withDefaults() // one shared graph for every tracker
 	known := map[string]bool{}
 	for _, r := range Registry {
 		known[r.Name] = true
@@ -78,7 +95,7 @@ func Select(enable, disable []string, sink Sink, now func() time.Time) ([]Tracke
 	var out []Tracker
 	for _, r := range Registry {
 		if (r.Default || en[r.Name]) && !dis[r.Name] {
-			out = append(out, r.New(sink, now))
+			out = append(out, r.New(env))
 		}
 	}
 	return out, nil
@@ -145,6 +162,7 @@ func (r *Runner) Run(ctx context.Context, trackers []Tracker) {
 	if r.Recheck <= 0 {
 		r.Recheck = 10 * time.Minute
 	}
+	trackers = expand(trackers)
 	r.mu.Lock()
 	r.status = map[string]*Status{}
 	for _, t := range trackers {

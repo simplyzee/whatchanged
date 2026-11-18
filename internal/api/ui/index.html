@@ -39,6 +39,11 @@
   .summary { margin-top: 2px; word-break: break-word; }
   .tags { margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; }
   .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 1px 8px; }
+  .tag.flag { color: var(--medium); border-color: var(--medium); }
+  .row { cursor: pointer; }
+  pre.diff { margin: 8px 0 0; padding: 10px; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-x: auto; white-space: pre; }
+  pre.diff .add { color: #4cc38a; } pre.diff .del { color: var(--high); }
   .score { font-size: 12px; font-weight: 700; color: var(--bg); background: var(--accent); border-radius: 6px; padding: 1px 6px; margin-right: 6px; }
   .signal .summary, .signal .title { color: var(--muted); }
   .empty { color: var(--muted); padding: 40px 0; text-align: center; }
@@ -67,6 +72,12 @@
     <option value="high">High only</option>
   </select>
   <input id="q" placeholder="search" aria-label="Search" size="14">
+  <select id="flag" aria-label="Risk flag">
+    <option value="">Any flags</option>
+    <option value="manual">Manual (kubectl)</option>
+    <option value="off-hours">Off-hours</option>
+    <option value="freeze">During freeze</option>
+  </select>
   <label><input id="signals" type="checkbox" checked> warnings</label>
 </div>
 <main>
@@ -109,10 +120,12 @@ function render(items, isSuspects) {
     if (isSuspects) title.append(el('span', 'score', String(c.score)));
     title.append(document.createTextNode((c.kind ? c.kind + '/' : '') + c.name));
     if (c.namespace) title.append(el('span', 'ns', '  ' + c.namespace));
+    if (signal && c.labels && c.labels.owner) title.append(el('span', 'ns', '  → ' + c.labels.owner));
     body.append(title);
     body.append(el('div', 'summary', c.summary));
     const tags = el('div', 'tags');
     for (const t of [c.source, c.action, c.actor && 'by ' + c.actor].filter(Boolean)) tags.append(el('span', 'tag', t));
+    for (const f of c.flags || []) tags.append(el('span', 'tag flag', f));
     if (isSuspects) for (const r of c.reasons || []) tags.append(el('span', 'tag', r));
     if (c.url && /^https?:\/\//.test(c.url)) {
       const a = el('a', 'tag', 'link'); a.href = c.url; a.rel = 'noopener noreferrer'; a.target = '_blank';
@@ -120,8 +133,25 @@ function render(items, isSuspects) {
     }
     body.append(tags);
     row.append(body);
+    if (!signal) row.onclick = (ev) => { if (ev.target.tagName !== 'A') toggleDiff(body, c.id); };
     list.append(row);
   }
+}
+
+async function toggleDiff(body, id) {
+  const open = body.querySelector('pre.diff');
+  if (open) { open.remove(); return; }
+  const pre = el('pre', 'diff', 'loading…');
+  body.append(pre);
+  try {
+    const r = await fetch('api/v1/changes/' + encodeURIComponent(id));
+    const c = await r.json();
+    pre.replaceChildren();
+    const lines = c.diff && c.diff.length ? c.diff : ['(no diff recorded for this change)'];
+    for (const l of lines) {
+      pre.append(el('span', l.startsWith('+') ? 'add' : l.startsWith('-') ? 'del' : '', l), document.createTextNode('\n'));
+    }
+  } catch (e) { pre.textContent = 'Error: ' + e.message; }
 }
 
 async function load() {
@@ -133,6 +163,7 @@ async function load() {
       p.set('since', $('since').value);
       if ($('impact').value) p.set('impact', $('impact').value);
       if ($('q').value.trim()) p.set('q', $('q').value.trim());
+      if ($('flag').value) p.set('flag', $('flag').value);
       if (!$('signals').checked) p.set('signals', 'false');
       p.set('limit', '1000');
       const r = await fetch('api/v1/changes?' + p);
@@ -162,11 +193,11 @@ function setMode(m) {
 
 $('mode-timeline').onclick = () => setMode('timeline');
 $('mode-suspects').onclick = () => setMode('suspects');
-for (const id of ['since', 'impact', 'signals']) $(id).onchange = load;
+for (const id of ['since', 'impact', 'flag', 'signals']) $(id).onchange = load;
 let t;
 for (const id of ['namespace', 'q']) $(id).oninput = () => { clearTimeout(t); t = setTimeout(load, 250); };
 load();
-setInterval(load, 15000);
+setInterval(() => { if (!document.querySelector('pre.diff')) load(); }, 15000);
 </script>
 </body>
 </html>
